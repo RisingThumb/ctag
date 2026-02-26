@@ -9,6 +9,10 @@
 #include <signal.h>
 #include <id3v2lib.h>
 
+/* popen/pclose are POSIX; declare to satisfy strict standards if needed */
+extern FILE *popen(const char *command, const char *type);
+extern int pclose(FILE *stream);
+
 #define CURSOR_INVIS    0
 #define DIRECTORYLINES 1000
 #define MAXDIRWIDTH 256
@@ -59,7 +63,7 @@ int fileDirty = 0;
 int updateEditor = 0;
 
 char * toptext = "Made by RisingThumb          https://risingthumb.xyz ";
-char * bottomtext = "TAB switch menu    Q to quit";
+char * bottomtext = "TAB switch menu    Q to quit    E edit    S save";
 
 struct keyData {
     int     key;
@@ -92,6 +96,12 @@ const struct keyData keyTable[] = {
     {kb_down,       kbf_down},
     {KEY_RESIZE,    kbf_resize}, /* Need to check if this is defined. KEY_RESIZE doesn't always exist... */
 };
+
+/* editing state */
+int edit_mode = 0; /* 0 = view, 1 = editing field */
+char title_buf[512] = {0};
+char artist_buf[512] = {0};
+char album_buf[512] = {0};
 
 enum states {
     never = 0,
@@ -129,6 +139,45 @@ int main( int argc, char *argv[]) {
         for (i = 1; i < (sizeof(keyTable) / sizeof(struct keyData)); i++) {
             if (ch == keyTable[i].key) {
                 (*keyTable[i].kfunc)();
+            }
+        }
+        /* additional keys for edit mode */
+        if (windows.state == edit) {
+            if (ch == 'e') {
+                /* enter simple editing prompt */
+                edit_mode = 1;
+                echo();
+                curs_set(1);
+                WINDOW *w = windows.editor->window;
+                mvwprintw(w, 3, 1, "Title : ");
+                wclrtoeol(w);
+                wrefresh(w);
+                wgetnstr(w, title_buf, sizeof(title_buf)-1);
+
+                mvwprintw(w, 4, 1, "Artist: ");
+                wclrtoeol(w);
+                wrefresh(w);
+                wgetnstr(w, artist_buf, sizeof(artist_buf)-1);
+
+                mvwprintw(w, 5, 1, "Album : ");
+                wclrtoeol(w);
+                wrefresh(w);
+                wgetnstr(w, album_buf, sizeof(album_buf)-1);
+
+                noecho();
+                curs_set(CURSOR_INVIS);
+                fileDirty = 1;
+                edit_mode = 0;
+            }
+            else if (ch == 's') {
+                if (fileSelected && fileDirty) {
+                    /* save using id3v2 commandline */
+                    char cmd[2048];
+                    /* Escape single quotes in filename by wrapping with double quotes */
+                    snprintf(cmd, sizeof(cmd), "id3v2 --song \"%s\" --artist \"%s\" --album \"%s\" \"%s\" 2>/dev/null", title_buf, artist_buf, album_buf, filenameEditing);
+                    system(cmd);
+                    fileDirty = 0;
+                }
             }
         }
     }
@@ -236,12 +285,58 @@ void getDirectoryInfo(int *size) {
     while((dp = readdir(dir)) != NULL)
         if (dp->d_name[0] != '.')
             strcpy(dirlines[i++], dp->d_name);
-    qsort(&dirlines, i, MAXDIRWIDTH, compare);
+    /* sort array of fixed-width strings */
+    qsort(dirlines, i, MAXDIRWIDTH, compare);
     *size = i;
 }
 
 int compare(const void* pa, const void *pb) {
-    return strcmp(pa, pb);
+    const char *a = (const char*)pa;
+    const char *b = (const char*)pb;
+    return strcmp(a, b);
+}
+
+/* Load ID3 fields via id3v2 CLI into title_buf/artist_buf/album_buf. */
+void load_id3_fields(const char *filename) {
+    /* clear buffers */
+    title_buf[0] = '\0';
+    artist_buf[0] = '\0';
+    album_buf[0] = '\0';
+    if (!filename) return;
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "id3v2 -l \"%s\" 2>/dev/null", filename);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return;
+    char line[1024];
+    while(fgets(line, sizeof(line), fp)) {
+        char *p = NULL;
+        if ((p = strstr(line, "TIT2")) != NULL) {
+            char *col = strchr(line, ':');
+            if (col) {
+                while (*(++col) == ' ');
+                strncpy(title_buf, col, sizeof(title_buf)-1);
+                /* trim newline */
+                title_buf[strcspn(title_buf, "\r\n")] = '\0';
+            }
+        }
+        else if ((p = strstr(line, "TPE1")) != NULL) {
+            char *col = strchr(line, ':');
+            if (col) {
+                while (*(++col) == ' ');
+                strncpy(artist_buf, col, sizeof(artist_buf)-1);
+                artist_buf[strcspn(artist_buf, "\r\n")] = '\0';
+            }
+        }
+        else if ((p = strstr(line, "TALB")) != NULL) {
+            char *col = strchr(line, ':');
+            if (col) {
+                while (*(++col) == ' ');
+                strncpy(album_buf, col, sizeof(album_buf)-1);
+                album_buf[strcspn(album_buf, "\r\n")] = '\0';
+            }
+        }
+    }
+    pclose(fp);
 }
 
 void initialiseColors() {
@@ -322,34 +417,32 @@ int ext_match(const char *name, const char *ext)
 }
 
 void drawEditor(windowData *wd) {
-    int i = 0;
     WINDOW* w = wd->window;
-    int mp3 = ext_match(filenameEditing, ".mp3");
-    printf("\n%d\n",mp3);
     wclear(w);
 
-    int y = wd->y;
-
-    if (fileSelected && mp3) {
-        char* buf = strcat(getcwd(NULL, 0), "/");
-        char* cmd = malloc(strlen(buf) + strlen(filenameEditing) + 1);
-        strcpy(cmd, buf);
-        strcat(cmd, filenameEditing);
-        ID3v2_tag* tag = load_tag(filenameEditing);
-        if (tag == NULL) {
-            tag = new_tag();
-        }
-        ID3v2_frame* frame_of_import = NULL;
-        frame_of_import = tag_get_title(tag);
-        ID3v2_frame_text_content* content = parse_text_frame_content(frame_of_import);
-        mvwprintw(w, 1, 1, content->data);
-
-        free(cmd);
-        free(buf);
-        free(frame_of_import);
-        free(content);
-        free(tag);
+    if (!fileSelected) {
+        mvwprintw(w, 1, 1, "No file selected. Press Enter on a file to edit.");
+        return;
     }
+
+    int mp3 = 0;
+    if (filenameEditing)
+        mp3 = ext_match(filenameEditing, ".mp3");
+
+    if (!mp3) {
+        mvwprintw(w, 1, 1, "Selected: %s", filenameEditing ? filenameEditing : "");
+        mvwprintw(w, 2, 1, "Not an MP3 file - metadata editing not supported.");
+        return;
+    }
+
+    /* load tag fields into buffers */
+    load_id3_fields(filenameEditing);
+
+    mvwprintw(w, 1, 1, "File  : %s", filenameEditing);
+    mvwprintw(w, 2, 1, "Title : %s", title_buf[0] ? title_buf : "");
+    mvwprintw(w, 3, 1, "Artist: %s", artist_buf[0] ? artist_buf : "");
+    mvwprintw(w, 4, 1, "Album : %s", album_buf[0] ? album_buf : "");
+    mvwprintw(w, 6, 1, "Press 'e' to edit fields, 's' to save changes.");
 }
 
 void drawWindow(windowData *wd) {
