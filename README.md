@@ -11,10 +11,22 @@ If you want to contribute, fork this repository and make a pull request.
 
 ## ToDo list
 
+### Priority 1
 - [X] Panels and windows structure
-- [ ] Directory and File browser
-- [ ] Edit single file tags
-- [ ] Marking and editing multiple files
+- [X] Directory and File browser
+- [X] Edit single file tags
+- [X] Marking and editing multiple files
+
+### Priority 2
+- [ ] Unicode support for input entries
+- [ ] Figure out that damn bug where it will sometimes get Alzheimers and display the wrong metadata information
+- [ ] An option to convert all music to use id3v2 tags
+- [ ] An option to make all music drop all id3v1 tags
+- [ ] PgUp, PgDown, Home and End key support
+
+### Priority 3
+- [ ] Allow vim style regexes on metadata?
+- [ ] Add a Fuzzy Finder search?
 - [ ] Config file header(inspired by suckless software)
 - [ ] Man pages/keybinds listed
 
