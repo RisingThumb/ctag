@@ -9,6 +9,8 @@ If you want to contribute, fork this repository and make a pull request.
 - Reporting a bug? Make an issue.
 - Made a feature? Make a pull request. First feature is evaluated. Then implementation. If the former is good but latter bad it will be reimplemented.
 
+Note: This is a small side project that is also an experiment on my part to see how viable LLMs are currently for general purpose programming. I have a nuanced opinion on LLMs currently, see my blog post on the [subject](https://risingthumb.xyz/Writing/Blog/Current_Opinions_on_AI_Generation), and this project would likely remain in my graveyard of ideas and projects if I didn't poke around with LLMs for it.
+
 ## ToDo list
 
 ### Priority 1
