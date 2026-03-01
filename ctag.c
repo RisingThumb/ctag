@@ -300,7 +300,11 @@ static void app_run(void)
 
     while (1) {
         render();
-        ch = tolower(getch());
+        {
+            int raw = getch();
+            if (raw >= 0 && raw <= 255) ch = tolower(raw);
+            else ch = raw;
+        }
         /* handle quit with confirmation */
         if (ch == keyTable[0].key) {
             int ok = confirm_modal("Quit", "Are you sure you want to quit?", 0);
@@ -377,7 +381,8 @@ static void app_run(void)
                 } else {
                     space_hold_repeat = 0;
                 }
-        }
+            }
+            }
 
         if (windows.state == dir && (ch == 'g' || ch == 'm')) {
             int i;
@@ -580,8 +585,6 @@ static void app_run(void)
                 suppress_enter_in_edit = 0;
         }
     }
-}
-
 }
 
 /* Clean up application */
