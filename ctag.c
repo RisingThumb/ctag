@@ -7,7 +7,6 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <signal.h>
-#include <id3v2lib.h>
 #include <limits.h>
 #include <time.h>
 #include <sys/time.h>
@@ -22,6 +21,8 @@
 /* popen/pclose are POSIX; declare to satisfy strict standards if needed */
 extern FILE *popen(const char *command, const char *type);
 extern int pclose(FILE *stream);
+/* fdopen may not be exposed under strict feature macros; declare it explicitly */
+extern FILE *fdopen(int fd, const char *mode);
 
 #define CURSOR_INVIS    0
 #define DIRECTORYLINES 1000
@@ -79,6 +80,21 @@ int run_fuzzy_modal(void);
 /* exec helper to run id3v2 without shell */
 static int run_id3v2_argv(char *const argv[]);
 static int id3v2_set_field(const char *filename, const char *option, const char *value);
+static int run_id3v2_list_parse(const char *filename, void (*line_cb)(char *line, void *ctx), void *ctx);
+static int run_find_mp3_print0_parse(const char *dir, void (*entry_cb)(const char *path, void *ctx), void *ctx);
+typedef struct {
+    char *title; size_t tlen;
+    char *artist; size_t alen;
+    char *album; size_t ablen;
+    char *track; size_t trlen;
+} id3_cb_ctx_t;
+typedef struct {
+    const char *value;
+    int is_artist;
+} find_cb_ctx_t;
+static void id3_into_cb(char *line, void *vctx);
+static void id3_app_cb(char *line, void *vctx);
+static void find_entry_cb_func(const char *path, void *vctx);
 /* id3v2_set_tags removed (unused); use id3v2_set_field or run_id3v2_argv */
 static void save_pending_tags(void);
 /* If ncurses provides wget_wch, declare it so we can use it when available. */
@@ -86,6 +102,8 @@ extern int wget_wch(WINDOW *win, wint_t *wch);
 /* ensure wcwidth/wcswidth prototypes are available when headers don't expose them */
 extern int wcwidth(wchar_t wc);
 extern int wcswidth(const wchar_t *pwcs, size_t n);
+
+
 
 /* helpers to convert between multibyte (UTF-8) and wide strings */
 static void mb_to_wc(const char *in, wchar_t *out, size_t outlen)
@@ -271,21 +289,31 @@ static int edit_field_at(WINDOW *w, int y, const char *label, wchar_t *widebuf, 
 /* Initialize application state and UI */
 static int app_init(int argc, char *argv[])
 {
-    windowData dirwin, editwin, panwin, panwinbottom;
+    windowData *dirwin, *editwin, *panwin, *panwinbottom;
 
     (void)argc; (void)argv;
 
-        windows.directory = &dirwin;
-        windows.editor = &editwin;
-        windows.toppanel = &panwin;
-        windows.bottompanel = &panwinbottom;
+        dirwin = malloc(sizeof(windowData));
+        editwin = malloc(sizeof(windowData));
+        panwin = malloc(sizeof(windowData));
+        panwinbottom = malloc(sizeof(windowData));
+
+        if (!dirwin || !editwin || !panwin || !panwinbottom) {
+            fprintf(stderr, "Out of memory allocating windows\n");
+            return 1;
+        }
+
+        windows.directory = dirwin;
+        windows.editor = editwin;
+        windows.toppanel = panwin;
+        windows.bottompanel = panwinbottom;
     windows.state = dir;
 
     terminal_start();
-    createNewWindow(LINES-2, COLS/2, 1, 0, 1, "-Directory-", dir, &dirwin);
-    createNewWindow(LINES-2, COLS/2, 1, COLS/2, 1, "-Edit tags-", edit, &editwin);
-    createNewWindow(1, COLS, 0, 0, 0, toptext, never, &panwin);
-    createNewWindow(1, COLS, LINES-1, 0, 0, bottomtext, never, &panwinbottom);
+    createNewWindow(LINES-2, COLS/2, 1, 0, 1, "-Directory-", dir, dirwin);
+    createNewWindow(LINES-2, COLS/2, 1, COLS/2, 1, "-Edit tags-", edit, editwin);
+    createNewWindow(1, COLS, 0, 0, 0, toptext, never, panwin);
+    createNewWindow(1, COLS, LINES-1, 0, 0, bottomtext, never, panwinbottom);
     kbf_resize();
 
     getDirectoryInfo(&windows.directory->dir_size);
@@ -460,10 +488,16 @@ static void app_run(void)
                     mb_to_wc(inputbuf, inputw, sizeof(inputw)/sizeof(wchar_t));
                 }
 
-                int accepted = get_input_with_cancel(mw, 4, 9, inputw, sizeof(inputw)/sizeof(wchar_t), inputw);
-                delwin(mw);
-                curs_set(CURSOR_INVIS);
-                if (!accepted) { app.updateEditor = 1; continue; }
+                     int accepted = get_input_with_cancel(mw, 4, 9, inputw, sizeof(inputw)/sizeof(wchar_t), inputw);
+                     delwin(mw);
+                     /* fully clear the physical screen then redraw underlying windows so
+                         the modal's characters are erased before tag updates run */
+                     clear();
+                     refresh();
+                     app.updateEditor = 1;
+                     render();
+                     curs_set(CURSOR_INVIS);
+                     if (!accepted) { continue; }
 
                 /* convert wide input back to multibyte for shell use */
                 wc_to_mb(inputw, inputbuf, sizeof(inputbuf));
@@ -471,26 +505,10 @@ static void app_run(void)
                 for (j = 0; j < tcnt; j++) {
                     const char *tname = dirlines[targets[j]];
                     /* use find -print0 and call id3v2 per-file to avoid shell quoting/encoding issues */
-                    char findcmd[2048];
-                    snprintf(findcmd, sizeof(findcmd), "find \"%s\" -type f -iname \"*.mp3\" -print0", tname);
-                    FILE *fp = popen(findcmd, "r");
-                    if (!fp) continue;
-                    char fname[MAX_PATH_LEN];
-                    int ci = 0;
-                    int cc;
-                    while ((cc = fgetc(fp)) != EOF) {
-                        if (cc == 0) {
-                            if (ci > 0) {
-                                fname[ci] = '\0';
-                                if (ch == 'a') id3v2_set_field(fname, "--artist", inputbuf);
-                                else id3v2_set_field(fname, "--album", inputbuf);
-                            }
-                            ci = 0;
-                        } else {
-                            if (ci < (int)sizeof(fname) - 1) fname[ci++] = (char)cc;
-                        }
-                    }
-                    pclose(fp);
+                        /* use find via exec to avoid shell expansion of directory names */
+                        find_cb_ctx_t fctx;
+                        fctx.value = inputbuf; fctx.is_artist = (ch == 'a');
+                        run_find_mp3_print0_parse(tname, find_entry_cb_func, &fctx);
                 }
                 app.updateEditor = 1;
             }
@@ -590,7 +608,12 @@ static void app_run(void)
 /* Clean up application */
 static void app_shutdown(void)
 {
+    /* stop ncurses and free allocated windowData structs */
     terminal_stop();
+    if (windows.directory) free(windows.directory);
+    if (windows.editor) free(windows.editor);
+    if (windows.toppanel) free(windows.toppanel);
+    if (windows.bottompanel) free(windows.bottompanel);
 }
 
 int main(int argc, char *argv[])
@@ -795,32 +818,61 @@ void clear_directory_selection(int count) {
     next_track_index = 1;
 }
 
+static void id3_into_cb(char *line, void *vctx)
+{
+    id3_cb_ctx_t *c = (id3_cb_ctx_t*)vctx;
+    if (strstr(line, "TIT2")) {
+        char *col = strchr(line, ':');
+        if (col) { while (*(++col) == ' '); strncpy(c->title, col, c->tlen-1); c->title[strcspn(c->title, "\r\n")] = '\0'; }
+    } else if (strstr(line, "TPE1")) {
+        char *col = strchr(line, ':');
+        if (col) { while (*(++col) == ' '); strncpy(c->artist, col, c->alen-1); c->artist[strcspn(c->artist, "\r\n")] = '\0'; }
+    } else if (strstr(line, "TALB")) {
+        char *col = strchr(line, ':');
+        if (col) { while (*(++col) == ' '); strncpy(c->album, col, c->ablen-1); c->album[strcspn(c->album, "\r\n")] = '\0'; }
+    } else if (strstr(line, "TRCK")) {
+        char *col = strchr(line, ':');
+        if (col) { while (*(++col) == ' '); strncpy(c->track, col, c->trlen-1); c->track[strcspn(c->track, "\r\n")] = '\0'; }
+    }
+}
+
+static void id3_app_cb(char *line, void *vctx)
+{
+    (void)vctx;
+    char *p = NULL;
+    if ((p = strstr(line, "TIT2")) != NULL) {
+        char *col = strchr(line, ':');
+        if (col) { while (*(++col) == ' '); strncpy(app.title_buf, col, sizeof(app.title_buf)-1); app.title_buf[strcspn(app.title_buf, "\r\n")] = '\0'; }
+    }
+    else if ((p = strstr(line, "TPE1")) != NULL) {
+        char *col = strchr(line, ':');
+        if (col) { while (*(++col) == ' '); strncpy(app.artist_buf, col, sizeof(app.artist_buf)-1); app.artist_buf[strcspn(app.artist_buf, "\r\n")] = '\0'; }
+    }
+    else if ((p = strstr(line, "TALB")) != NULL) {
+        char *col = strchr(line, ':');
+        if (col) { while (*(++col) == ' '); strncpy(app.album_buf, col, sizeof(app.album_buf)-1); app.album_buf[strcspn(app.album_buf, "\r\n")] = '\0'; }
+    }
+    else if ((p = strstr(line, "TRCK")) != NULL) {
+        char *col = strchr(line, ':');
+        if (col) { while (*(++col) == ' '); strncpy(app.track_buf, col, sizeof(app.track_buf)-1); app.track_buf[strcspn(app.track_buf, "\r\n")] = '\0'; }
+    }
+}
+
+static void find_entry_cb_func(const char *path, void *vctx)
+{
+    find_cb_ctx_t *c = (find_cb_ctx_t*)vctx;
+    if (c->is_artist) id3v2_set_field(path, "--artist", c->value);
+    else id3v2_set_field(path, "--album", c->value);
+}
+
 /* Load ID3 into provided buffers; returns 0 on success */
 int load_id3_into(const char *filename, char *out_title, size_t tlen, char *out_artist, size_t alen, char *out_album, size_t ablen, char *out_track, size_t trlen)
 {
     if (!filename) return -1;
     out_title[0] = '\0'; out_artist[0] = '\0'; out_album[0] = '\0'; out_track[0] = '\0';
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "id3v2 -l \"%s\" 2>/dev/null", filename);
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return -1;
-    char line[1024];
-    while(fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "TIT2")) {
-            char *col = strchr(line, ':');
-            if (col) { while (*(++col) == ' '); strncpy(out_title, col, tlen-1); out_title[strcspn(out_title, "\r\n")] = '\0'; }
-        } else if (strstr(line, "TPE1")) {
-            char *col = strchr(line, ':');
-            if (col) { while (*(++col) == ' '); strncpy(out_artist, col, alen-1); out_artist[strcspn(out_artist, "\r\n")] = '\0'; }
-        } else if (strstr(line, "TALB")) {
-            char *col = strchr(line, ':');
-            if (col) { while (*(++col) == ' '); strncpy(out_album, col, ablen-1); out_album[strcspn(out_album, "\r\n")] = '\0'; }
-        } else if (strstr(line, "TRCK")) {
-            char *col = strchr(line, ':');
-            if (col) { while (*(++col) == ' '); strncpy(out_track, col, trlen-1); out_track[strcspn(out_track, "\r\n")] = '\0'; }
-        }
-    }
-    pclose(fp);
+    id3_cb_ctx_t ctx;
+    ctx.title = out_title; ctx.tlen = tlen; ctx.artist = out_artist; ctx.alen = alen; ctx.album = out_album; ctx.ablen = ablen; ctx.track = out_track; ctx.trlen = trlen;
+    if (!run_id3v2_list_parse(filename, id3_into_cb, &ctx)) return -1;
     return 0;
 }
 
@@ -933,48 +985,7 @@ void load_id3_fields(const char *filename) {
     app.album_buf[0] = '\0';
     app.track_buf[0] = '\0';
     if (!filename) return;
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "id3v2 -l \"%s\" 2>/dev/null", filename);
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return;
-    char line[1024];
-    while(fgets(line, sizeof(line), fp)) {
-        char *p = NULL;
-        if ((p = strstr(line, "TIT2")) != NULL) {
-            char *col = strchr(line, ':');
-            if (col) {
-                while (*(++col) == ' ');
-                strncpy(app.title_buf, col, sizeof(app.title_buf)-1);
-                /* trim newline */
-                app.title_buf[strcspn(app.title_buf, "\r\n")] = '\0';
-            }
-        }
-        else if ((p = strstr(line, "TPE1")) != NULL) {
-            char *col = strchr(line, ':');
-            if (col) {
-                while (*(++col) == ' ');
-                strncpy(app.artist_buf, col, sizeof(app.artist_buf)-1);
-                app.artist_buf[strcspn(app.artist_buf, "\r\n")] = '\0';
-            }
-        }
-        else if ((p = strstr(line, "TALB")) != NULL) {
-            char *col = strchr(line, ':');
-            if (col) {
-                while (*(++col) == ' ');
-                strncpy(app.album_buf, col, sizeof(app.album_buf)-1);
-                app.album_buf[strcspn(app.album_buf, "\r\n")] = '\0';
-            }
-        }
-        else if ((p = strstr(line, "TRCK")) != NULL) {
-            char *col = strchr(line, ':');
-            if (col) {
-                while (*(++col) == ' ');
-                strncpy(app.track_buf, col, sizeof(app.track_buf)-1);
-                app.track_buf[strcspn(app.track_buf, "\r\n")] = '\0';
-            }
-        }
-    }
-    pclose(fp);
+    run_id3v2_list_parse(filename, id3_app_cb, NULL);
     /* convert multibyte to wide for display/editing */
     mb_to_wc(app.title_buf, app.title_w, sizeof(app.title_w)/sizeof(wchar_t));
     mb_to_wc(app.artist_buf, app.artist_w, sizeof(app.artist_w)/sizeof(wchar_t));
@@ -1165,87 +1176,123 @@ static int wget_wide_impl(WINDOW *ww, wint_t *outch)
 }
 
 /* Run id3v2 with argv (argv[0] should be "id3v2"). Returns 1 on success. */
+static int run_id3v2_argv(char *const argv[]);
+static int run_id3v2_list_parse(const char *filename, void (*line_cb)(char *line, void *ctx), void *ctx);
+static int run_find_mp3_print0_parse(const char *dir, void (*entry_cb)(const char *path, void *ctx), void *ctx);
+
 static int run_id3v2_argv(char *const argv[])
 {
     if (!argv || !argv[0]) return 0;
-    /* parse argv-style options and apply them via id3v2lib */
-    const char *title = NULL, *artist = NULL, *album = NULL, *track = NULL, *year = NULL, *comment = NULL;
-    int i = 1;
-    while (argv[i]) {
-        const char *opt = argv[i];
-        if (opt[0] == '-') {
-            /* option expects a value */
-            if (!argv[i+1]) return 0;
-            if (strcmp(opt, "--song") == 0 || strcmp(opt, "--title") == 0) { title = argv[++i]; }
-            else if (strcmp(opt, "--artist") == 0) { artist = argv[++i]; }
-            else if (strcmp(opt, "--album") == 0) { album = argv[++i]; }
-            else if (strcmp(opt, "--track") == 0) { track = argv[++i]; }
-            else if (strcmp(opt, "--year") == 0) { year = argv[++i]; }
-            else if (strcmp(opt, "--comment") == 0) { comment = argv[++i]; }
-            else {
-                /* unknown option: cannot handle here */
-                return 0;
+    pid_t pid = fork();
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        /* child: exec the id3v2 program with provided argv */
+        execvp(argv[0], argv);
+        _exit(127);
+    } else {
+        int status = 0;
+        if (waitpid(pid, &status, 0) == -1) return 0;
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return 1;
+        return 0;
+    }
+}
+
+/* Run `id3v2 -l filename` and invoke callback for each output line. Returns 1 on success. */
+static int run_id3v2_list_parse(const char *filename, void (*line_cb)(char *line, void *ctx), void *ctx)
+{
+    if (!filename || !line_cb) return 0;
+    int pipefd[2];
+    if (pipe(pipefd) < 0) return 0;
+    pid_t pid = fork();
+    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return 0; }
+    if (pid == 0) {
+        /* child */
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[0]); close(pipefd[1]);
+        /* redirect stderr to /dev/null */
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+        char *argv[] = {"id3v2", "-l", (char*)filename, NULL};
+        execvp("id3v2", argv);
+        _exit(127);
+    }
+    /* parent */
+    close(pipefd[1]);
+    FILE *fp = fdopen(pipefd[0], "r");
+    if (!fp) { close(pipefd[0]); waitpid(pid, NULL, 0); return 0; }
+    char line[1024];
+    while (fgets(line, sizeof(line), fp)) {
+        line_cb(line, ctx);
+    }
+    fclose(fp);
+    int status = 0; waitpid(pid, &status, 0);
+    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 1 : 0;
+}
+
+/* Run `find <dir> -type f -iname "*.mp3" -print0` and invoke callback for each null-delimited path. */
+static int run_find_mp3_print0_parse(const char *dir, void (*entry_cb)(const char *path, void *ctx), void *ctx)
+{
+    if (!dir || !entry_cb) return 0;
+    int pipefd[2];
+    if (pipe(pipefd) < 0) return 0;
+    pid_t pid = fork();
+    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return 0; }
+    if (pid == 0) {
+        /* child */
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[0]); close(pipefd[1]);
+        char *argv[] = {"find", (char*)dir, "-type", "f", "-iname", "*.mp3", "-print0", NULL};
+        execvp("find", argv);
+        _exit(127);
+    }
+    /* parent */
+    close(pipefd[1]);
+    FILE *fp = fdopen(pipefd[0], "r");
+    if (!fp) { close(pipefd[0]); waitpid(pid, NULL, 0); return 0; }
+    char buf[MAX_PATH_LEN];
+    int bi = 0; int c;
+    while ((c = fgetc(fp)) != EOF) {
+        if (c == 0) {
+            if (bi > 0) {
+                buf[bi] = '\0';
+                entry_cb(buf, ctx);
             }
-            i++;
-            continue;
+            bi = 0;
+        } else {
+            if (bi < (int)sizeof(buf) - 1) buf[bi++] = (char)c;
         }
-        break;
     }
-    if (!argv[i]) return 0; /* no filename provided */
-    int any = 0;
-    for (; argv[i]; i++) {
-        const char *fn = argv[i];
-        if (!fn) continue;
-        ID3v2_tag *tag = load_tag(fn);
-        if (!tag) tag = new_tag();
-        char enc = ISO_ENCODING;
-        if (title && title[0]) tag_set_title((char*)title, enc, tag);
-        if (artist && artist[0]) tag_set_artist((char*)artist, enc, tag);
-        if (album && album[0]) tag_set_album((char*)album, enc, tag);
-        if (track && track[0]) tag_set_track((char*)track, enc, tag);
-        if (year && year[0]) tag_set_year((char*)year, enc, tag);
-        if (comment && comment[0]) tag_set_comment((char*)comment, enc, tag);
-        set_tag(fn, tag);
-        free_tag(tag);
-        any = 1;
-    }
-    return any ? 1 : 0;
+    fclose(fp);
+    int status = 0; waitpid(pid, &status, 0);
+    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 1 : 0;
 }
 
 /* Convenience wrappers for id3v2 actions. */
 static int id3v2_set_field(const char *filename, const char *option, const char *value)
 {
     if (!filename || !option) return 0;
-    ID3v2_tag *tag = load_tag(filename);
-    if (!tag) tag = new_tag();
-    /* choose ISO encoding by default for compatibility */
-    char enc = ISO_ENCODING;
-    if (strcmp(option, "--song") == 0 || strcmp(option, "--title") == 0) {
-        tag_set_title((char*)value, enc, tag);
-    } else if (strcmp(option, "--artist") == 0) {
-        tag_set_artist((char*)value, enc, tag);
-    } else if (strcmp(option, "--album") == 0) {
-        tag_set_album((char*)value, enc, tag);
-    } else if (strcmp(option, "--track") == 0) {
-        tag_set_track((char*)value, enc, tag);
-    } else if (strcmp(option, "--year") == 0) {
-        tag_set_year((char*)value, enc, tag);
-    } else if (strcmp(option, "--comment") == 0) {
-        tag_set_comment((char*)value, enc, tag);
-    } else {
-        /* unknown option: fallback to CLI */
-        char *args[6]; int ai = 0;
-        args[ai++] = "id3v2";
-        args[ai++] = (char*)option;
-        args[ai++] = (char*)value;
-        args[ai++] = (char*)filename;
-        args[ai] = NULL;
-        if (tag) free_tag(tag);
-        return run_id3v2_argv(args);
+    /* Use the id3v2 CLI to set the field to avoid id3v2lib crashes */
+    char *args[6]; int ai = 0;
+    args[ai++] = "id3v2";
+    args[ai++] = (char*)option;
+    args[ai++] = (char*)value;
+    args[ai++] = (char*)filename;
+    args[ai] = NULL;
+    int ok = run_id3v2_argv(args);
+    /* Verify artist write for robustness; if it didn't stick, try a shell fallback. */
+    if (ok && strcmp(option, "--artist") == 0) {
+        char ttitle[512] = "", tartist[512] = "", talbum[512] = "", ttrack[64] = "";
+        if (load_id3_into(filename, ttitle, sizeof(ttitle), tartist, sizeof(tartist), talbum, sizeof(talbum), ttrack, sizeof(ttrack)) == 0) {
+            if (!(value && tartist[0] && strcmp(tartist, value) == 0)) {
+                char esc[1024];
+                shell_escape_double_quotes(value ? value : "", esc, sizeof(esc));
+                char cmd[2048];
+                snprintf(cmd, sizeof(cmd), "id3v2 --artist \"%s\" \"%s\" >/dev/null 2>&1", esc, filename);
+                system(cmd);
+            }
+        }
     }
-    set_tag(filename, tag);
-    free_tag(tag);
-    return 1;
+    return ok;
 }
 
 /* id3v2_set_tags removed (unused) */

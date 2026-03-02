@@ -7,4 +7,4 @@ CFLAGS+=-std=c11 -pedantic -Wall
 LDFLAGS+=-L/usr/local/lib
 
 all:
-	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $(CURSES) $(LIBS) $(FILES) -lid3v2 -o $(PROG)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $(CURSES) $(LIBS) $(FILES) -o $(PROG)
