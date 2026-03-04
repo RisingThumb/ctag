@@ -62,14 +62,15 @@ void shell_escape_double_quotes(const char *src, char *dst, size_t dlen);
 int isRegularFile(char* filename);
 int is_supported_audio_file(const char *filename);
 void clear_directory_selection(int count);
-int load_id3_into(const char *filename, char *out_title, size_t tlen, char *out_artist, size_t alen, char *out_album, size_t ablen, char *out_track, size_t trlen);
-void load_common_fields(char filenames[][MAXDIRWIDTH], int count, char *out_title, char *out_artist, char *out_album, char *out_track);
+int load_id3_into(const char *filename, char *out_title, size_t tlen, char *out_artist, size_t alen, char *out_album, size_t ablen, char *out_track, size_t trlen, char *out_year, size_t yrlen, char *out_genre, size_t grlen);
+void load_common_fields(char filenames[][MAXDIRWIDTH], int count, char *out_title, char *out_artist, char *out_album, char *out_track, char *out_year, char *out_genre);
 int compare(const void* pa, const void *pb);
 void resizehandler(int sig);
 void terminal_stop();
 void terminal_start();
 void get_window_dimensions();
 int get_input_with_cancel(WINDOW *w, int y, int x, wchar_t *out, size_t max, const wchar_t *initial);
+static void directory_set_field(int field_type);
 /* ID3v1 compatibility helpers */
 int has_id3v1(const char *filename);
 int convert_id3v1_to_v2(const char *filename);
@@ -87,10 +88,12 @@ typedef struct {
     char *artist; size_t alen;
     char *album; size_t ablen;
     char *track; size_t trlen;
+    char *year; size_t yrlen;
+    char *genre; size_t grlen;
 } id3_cb_ctx_t;
 typedef struct {
     const char *value;
-    int is_artist;
+    int field_type; /* 0=artist,1=album,2=year,3=genre */
 } find_cb_ctx_t;
 static void id3_into_cb(char *line, void *vctx);
 static void id3_app_cb(char *line, void *vctx);
@@ -163,10 +166,10 @@ char selected_flags[DIRECTORYLINES] = {0};
 int track_order[DIRECTORYLINES];
 
 
+#define BOTTOM_HINTS_TEXT "  SP select  A set-artist  L set-album  Y set-year  N set-genre  T write-tracks  G select-all  M select-music"
 char * toptext = "Made by RisingThumb          https://risingthumb.xyz ";
-#define BOTTOM_HINTS_TEXT "  SP select  A set-artist  L set-album  T write-tracks  G select-all  M select-music"
 char * bottomtext = "TAB switch menu    Q to quit    E edit    S save" BOTTOM_HINTS_TEXT;
-#define BOTTOM_HINTS " SP:select A:set-artist L:set-album"
+#define BOTTOM_HINTS " SP:select A:set-artist L:set-album Y:set-year N:set-genre"
 
 struct keyData {
     int     key;
@@ -222,10 +225,14 @@ typedef struct AppState {
     char title_buf[512];
     char artist_buf[512];
     char album_buf[512];
+    char year_buf[32];
+    char genre_buf[128];
     char track_buf[64];
     wchar_t title_w[512];
     wchar_t artist_w[512];
     wchar_t album_w[512];
+    wchar_t year_w[32];
+    wchar_t genre_w[128];
     wchar_t track_w[64];
     int editor_field; /* 0=title,1=artist,2=album */
 } AppState;
@@ -447,72 +454,12 @@ static void app_run(void)
             app.updateEditor = 1;
         }
 
-        if (windows.state == dir && (ch == 'a' || ch == 'l')) {
-            int targets[DIRECTORYLINES];
-            int tcnt = 0;
-            int j;
-            for (j = 0; j < windows.directory->dir_size; j++) {
-                if (selected_flags[j]) {
-                    if (!isRegularFile(dirlines[j])) targets[tcnt++] = j;
-                }
-            }
-            if (tcnt == 0) {
-                int sid = windows.directory->sel_id;
-                if (sid >= 0 && sid < windows.directory->dir_size && !isRegularFile(dirlines[sid])) targets[tcnt++] = sid;
-            }
-                if (tcnt == 0) { app.updateEditor = 1; }
-            else {
-                char prompt[1024];
-                if (tcnt == 1) snprintf(prompt, sizeof(prompt), "%s recursively under '%s'", ch == 'a' ? "Set ARTIST" : "Set ALBUM", dirlines[targets[0]]);
-                else snprintf(prompt, sizeof(prompt), "%s recursively on %d selected folders", ch == 'a' ? "Set ARTIST" : "Set ALBUM", tcnt);
-
-                int h = 7;
-                int w = COLS > 80 ? 80 : COLS - 4;
-                int starty = (LINES - h) / 2;
-                int startx = (COLS - w) / 2;
-                WINDOW *mw = newwin(h, w, starty, startx);
-                box(mw, 0, 0);
-                mvwprintw(mw, 0, 2, "%s", ch == 'a' ? "Set ARTIST" : "Set ALBUM");
-                mvwprintw(mw, 2, 2, "%s", prompt);
-                mvwprintw(mw, 4, 2, "Value: ");
-                wrefresh(mw);
-                keypad(mw, TRUE);
-                curs_set(1);
-
-                char inputbuf[1024] = "";
-                wchar_t inputw[1024];
-                inputw[0] = L'\0';
-                if (tcnt == 1) {
-                    strncpy(inputbuf, dirlines[targets[0]], sizeof(inputbuf)-1);
-                    inputbuf[sizeof(inputbuf)-1] = '\0';
-                    mb_to_wc(inputbuf, inputw, sizeof(inputw)/sizeof(wchar_t));
-                }
-
-                     int accepted = get_input_with_cancel(mw, 4, 9, inputw, sizeof(inputw)/sizeof(wchar_t), inputw);
-                     delwin(mw);
-                     /* fully clear the physical screen then redraw underlying windows so
-                         the modal's characters are erased before tag updates run */
-                     clear();
-                     refresh();
-                     app.updateEditor = 1;
-                     render();
-                     curs_set(CURSOR_INVIS);
-                     if (!accepted) { continue; }
-
-                /* convert wide input back to multibyte for shell use */
-                wc_to_mb(inputw, inputbuf, sizeof(inputbuf));
-
-                for (j = 0; j < tcnt; j++) {
-                    const char *tname = dirlines[targets[j]];
-                    /* use find -print0 and call id3v2 per-file to avoid shell quoting/encoding issues */
-                        /* use find via exec to avoid shell expansion of directory names */
-                        find_cb_ctx_t fctx;
-                        fctx.value = inputbuf; fctx.is_artist = (ch == 'a');
-                        run_find_mp3_print0_parse(tname, find_entry_cb_func, &fctx);
-                }
-                app.updateEditor = 1;
-            }
+        if (windows.state == dir && (ch == 'a' || ch == 'l' || ch == 'y' || ch == 'n')) {
+            int field = (ch == 'a') ? 0 : (ch == 'l') ? 1 : (ch == 'y') ? 2 : 3;
+            directory_set_field(field);
         }
+
+        /* year/genre handled by directory_set_field() above */
 
         if (windows.state == dir && ch == 't') {
             if (selected_count <= 0) {
@@ -589,6 +536,10 @@ static void app_run(void)
                     edit_field_at(w, 4, "Album : ", app.album_w, sizeof(app.album_w)/sizeof(wchar_t), app.album_buf, sizeof(app.album_buf));
                 } else if (app.editor_field == 3) {
                     edit_field_at(w, 5, "Track : ", app.track_w, sizeof(app.track_w)/sizeof(wchar_t), app.track_buf, sizeof(app.track_buf));
+                } else if (app.editor_field == 4) {
+                    edit_field_at(w, 6, "Year  : ", app.year_w, sizeof(app.year_w)/sizeof(wchar_t), app.year_buf, sizeof(app.year_buf));
+                } else if (app.editor_field == 5) {
+                    edit_field_at(w, 7, "Genre : ", app.genre_w, sizeof(app.genre_w)/sizeof(wchar_t), app.genre_buf, sizeof(app.genre_buf));
                 }
 
                 app.updateEditor = 1;
@@ -740,8 +691,8 @@ void move_sel_id(int amount) {
         }
         app.updateEditor = 1;
     } else if (windows.state == edit) {
-        /* move hovered metadata field up */
-        app.editor_field = max(min(app.editor_field + amount, 3), 0);
+        /* move hovered metadata field up (now 0..5) */
+        app.editor_field = max(min(app.editor_field + amount, 5), 0);
         app.updateEditor = 1;
     }
 }
@@ -833,6 +784,16 @@ static void id3_into_cb(char *line, void *vctx)
     } else if (strstr(line, "TRCK")) {
         char *col = strchr(line, ':');
         if (col) { while (*(++col) == ' '); strncpy(c->track, col, c->trlen-1); c->track[strcspn(c->track, "\r\n")] = '\0'; }
+    } else if (strstr(line, "TYER") || strstr(line, "TDRC")) {
+        if (c->year && c->yrlen > 0) {
+            char *col = strchr(line, ':');
+            if (col) { while (*(++col) == ' '); strncpy(c->year, col, c->yrlen-1); c->year[strcspn(c->year, "\r\n")] = '\0'; }
+        }
+    } else if (strstr(line, "TCON")) {
+        if (c->genre && c->grlen > 0) {
+            char *col = strchr(line, ':');
+            if (col) { while (*(++col) == ' '); strncpy(c->genre, col, c->grlen-1); c->genre[strcspn(c->genre, "\r\n")] = '\0'; }
+        }
     }
 }
 
@@ -856,39 +817,127 @@ static void id3_app_cb(char *line, void *vctx)
         char *col = strchr(line, ':');
         if (col) { while (*(++col) == ' '); strncpy(app.track_buf, col, sizeof(app.track_buf)-1); app.track_buf[strcspn(app.track_buf, "\r\n")] = '\0'; }
     }
+    else if ((p = strstr(line, "TYER")) != NULL || (p = strstr(line, "TDRC")) != NULL) {
+        char *col = strchr(line, ':');
+        if (col) { while (*(++col) == ' '); strncpy(app.year_buf, col, sizeof(app.year_buf)-1); app.year_buf[strcspn(app.year_buf, "\r\n")] = '\0'; }
+    }
+    else if ((p = strstr(line, "TCON")) != NULL) {
+        char *col = strchr(line, ':');
+        if (col) { while (*(++col) == ' '); strncpy(app.genre_buf, col, sizeof(app.genre_buf)-1); app.genre_buf[strcspn(app.genre_buf, "\r\n")] = '\0'; }
+    }
 }
 
 static void find_entry_cb_func(const char *path, void *vctx)
 {
     find_cb_ctx_t *c = (find_cb_ctx_t*)vctx;
-    if (c->is_artist) id3v2_set_field(path, "--artist", c->value);
-    else id3v2_set_field(path, "--album", c->value);
+    if (!c) return;
+    switch (c->field_type) {
+        case 0: id3v2_set_field(path, "--artist", c->value); break;
+        case 1: id3v2_set_field(path, "--album", c->value); break;
+        case 2: id3v2_set_field(path, "--year", c->value); break;
+        case 3: id3v2_set_field(path, "--genre", c->value); break;
+        default: id3v2_set_field(path, "--artist", c->value); break;
+    }
+}
+
+/* Helper to show modal and recursively set a metadata field under selected folders.
+   field_type: 0=artist,1=album,2=year,3=genre */
+static void directory_set_field(int field_type)
+{
+    int targets[DIRECTORYLINES];
+    int tcnt = 0;
+    int j;
+    for (j = 0; j < windows.directory->dir_size; j++) {
+        if (selected_flags[j]) {
+            if (!isRegularFile(dirlines[j])) targets[tcnt++] = j;
+        }
+    }
+    if (tcnt == 0) {
+        int sid = windows.directory->sel_id;
+        if (sid >= 0 && sid < windows.directory->dir_size && !isRegularFile(dirlines[sid])) targets[tcnt++] = sid;
+    }
+    if (tcnt == 0) { app.updateEditor = 1; return; }
+
+    char prompt[1024];
+    const char *label = "";
+    if (field_type == 0) label = "Set ARTIST";
+    else if (field_type == 1) label = "Set ALBUM";
+    else if (field_type == 2) label = "Set YEAR";
+    else if (field_type == 3) label = "Set GENRE";
+
+    if (tcnt == 1) snprintf(prompt, sizeof(prompt), "%s recursively under '%s'", label, dirlines[targets[0]]);
+    else snprintf(prompt, sizeof(prompt), "%s recursively on %d selected folders", label, tcnt);
+
+    int h = 7;
+    int w = COLS > 80 ? 80 : COLS - 4;
+    int starty = (LINES - h) / 2;
+    int startx = (COLS - w) / 2;
+    WINDOW *mw = newwin(h, w, starty, startx);
+    box(mw, 0, 0);
+    mvwprintw(mw, 0, 2, "%s", label);
+    mvwprintw(mw, 2, 2, "%s", prompt);
+    mvwprintw(mw, 4, 2, "Value: ");
+    wrefresh(mw);
+    keypad(mw, TRUE);
+    curs_set(1);
+
+    char inputbuf[1024] = "";
+    wchar_t inputw[1024];
+    inputw[0] = L'\0';
+    if (tcnt == 1) {
+        strncpy(inputbuf, dirlines[targets[0]], sizeof(inputbuf)-1);
+        inputbuf[sizeof(inputbuf)-1] = '\0';
+        mb_to_wc(inputbuf, inputw, sizeof(inputw)/sizeof(wchar_t));
+    }
+
+    int accepted = get_input_with_cancel(mw, 4, 9, inputw, sizeof(inputw)/sizeof(wchar_t), inputw);
+    delwin(mw);
+    /* fully clear the physical screen then redraw underlying windows so the modal is erased */
+    clear(); refresh(); app.updateEditor = 1; render(); curs_set(CURSOR_INVIS);
+    if (!accepted) return;
+
+    wc_to_mb(inputw, inputbuf, sizeof(inputbuf));
+    for (j = 0; j < tcnt; j++) {
+        const char *tname = dirlines[targets[j]];
+        find_cb_ctx_t fctx;
+        fctx.value = inputbuf; fctx.field_type = field_type;
+        run_find_mp3_print0_parse(tname, find_entry_cb_func, &fctx);
+    }
+    app.updateEditor = 1;
 }
 
 /* Load ID3 into provided buffers; returns 0 on success */
-int load_id3_into(const char *filename, char *out_title, size_t tlen, char *out_artist, size_t alen, char *out_album, size_t ablen, char *out_track, size_t trlen)
+int load_id3_into(const char *filename, char *out_title, size_t tlen, char *out_artist, size_t alen, char *out_album, size_t ablen, char *out_track, size_t trlen, char *out_year, size_t yrlen, char *out_genre, size_t grlen)
 {
     if (!filename) return -1;
     out_title[0] = '\0'; out_artist[0] = '\0'; out_album[0] = '\0'; out_track[0] = '\0';
+    if (out_year) out_year[0] = '\0';
+    if (out_genre) out_genre[0] = '\0';
+    /* year and genre optional outputs may be NULL when caller doesn't need them */
     id3_cb_ctx_t ctx;
     ctx.title = out_title; ctx.tlen = tlen; ctx.artist = out_artist; ctx.alen = alen; ctx.album = out_album; ctx.ablen = ablen; ctx.track = out_track; ctx.trlen = trlen;
+    ctx.year = out_year; ctx.yrlen = yrlen; ctx.genre = out_genre; ctx.grlen = grlen;
     if (!run_id3v2_list_parse(filename, id3_into_cb, &ctx)) return -1;
     return 0;
 }
 
 /* Given an array of filenames, set out_* to the common value across all files,
    or empty string if they differ. */
-void load_common_fields(char filenames[][MAXDIRWIDTH], int count, char *out_title, char *out_artist, char *out_album, char *out_track)
+void load_common_fields(char filenames[][MAXDIRWIDTH], int count, char *out_title, char *out_artist, char *out_album, char *out_track, char *out_year, char *out_genre)
 {
     char tbuf[512], abuf[512], albuf[512], trbuf[64];
+    char ybuf[64], gbuf[128];
     int i;
     out_title[0] = '\0'; out_artist[0] = '\0'; out_album[0] = '\0'; out_track[0] = '\0';
+    if (out_year) out_year[0] = '\0';
+    if (out_genre) out_genre[0] = '\0';
     if (count <= 0) return;
     /* load first file into out_* */
-    if (load_id3_into(filenames[0], out_title, 512, out_artist, 512, out_album, 512, out_track, 64) != 0) return;
+    if (load_id3_into(filenames[0], out_title, 512, out_artist, 512, out_album, 512, out_track, 64, out_year, out_year ? 32 : 0, out_genre, out_genre ? 128 : 0) != 0) return;
     for (i = 1; i < count; i++) {
         tbuf[0]=abuf[0]=albuf[0]=trbuf[0]='\0';
-        load_id3_into(filenames[i], tbuf, sizeof(tbuf), abuf, sizeof(abuf), albuf, sizeof(albuf), trbuf, sizeof(trbuf));
+        ybuf[0]=gbuf[0]='\0';
+        load_id3_into(filenames[i], tbuf, sizeof(tbuf), abuf, sizeof(abuf), albuf, sizeof(albuf), trbuf, sizeof(trbuf), ybuf, sizeof(ybuf), gbuf, sizeof(gbuf));
         if (out_title[0] && tbuf[0] && strcmp(out_title, tbuf) != 0) out_title[0] = '\0';
         else if (!tbuf[0]) out_title[0] = '\0';
         if (out_artist[0] && abuf[0] && strcmp(out_artist, abuf) != 0) out_artist[0] = '\0';
@@ -897,6 +946,10 @@ void load_common_fields(char filenames[][MAXDIRWIDTH], int count, char *out_titl
         else if (!albuf[0]) out_album[0] = '\0';
         if (out_track[0] && trbuf[0] && strcmp(out_track, trbuf) != 0) out_track[0] = '\0';
         else if (!trbuf[0]) out_track[0] = '\0';
+        if (out_year && out_year[0] && ybuf[0] && strcmp(out_year, ybuf) != 0) out_year[0] = '\0';
+        else if (out_year && !ybuf[0]) out_year[0] = '\0';
+        if (out_genre && out_genre[0] && gbuf[0] && strcmp(out_genre, gbuf) != 0) out_genre[0] = '\0';
+        else if (out_genre && !gbuf[0]) out_genre[0] = '\0';
     }
 }
 
@@ -984,6 +1037,8 @@ void load_id3_fields(const char *filename) {
     app.artist_buf[0] = '\0';
     app.album_buf[0] = '\0';
     app.track_buf[0] = '\0';
+    app.year_buf[0] = '\0';
+    app.genre_buf[0] = '\0';
     if (!filename) return;
     run_id3v2_list_parse(filename, id3_app_cb, NULL);
     /* convert multibyte to wide for display/editing */
@@ -991,6 +1046,8 @@ void load_id3_fields(const char *filename) {
     mb_to_wc(app.artist_buf, app.artist_w, sizeof(app.artist_w)/sizeof(wchar_t));
     mb_to_wc(app.album_buf, app.album_w, sizeof(app.album_w)/sizeof(wchar_t));
     mb_to_wc(app.track_buf, app.track_w, sizeof(app.track_w)/sizeof(wchar_t));
+    mb_to_wc(app.year_buf, app.year_w, sizeof(app.year_w)/sizeof(wchar_t));
+    mb_to_wc(app.genre_buf, app.genre_w, sizeof(app.genre_w)/sizeof(wchar_t));
 }
 
 void initialiseColors() {
@@ -1037,7 +1094,7 @@ void drawBottomPanel(void)
     if (edit_mode) {
         mvwprintw(w, 0, 1, "Editing: Enter accept  Esc/Tab cancel");
     } else if (windows.state == dir) {
-        mvwprintw(w, 0, 1, "TAB switch menu  Q quit  SP select  A set-artist  L set-album  T write-tracks  G select-all  M select-music  C convert  E edit");
+        mvwprintw(w, 0, 1, "TAB switch menu  Q quit  SP select  A set-artist  L set-album  Y set-year  N set-genre  T write-tracks  G select-all  M select-music  C convert  E edit");
     } else if (windows.state == edit) {
         mvwprintw(w, 0, 1, "TAB switch menu  Q quit  E edit  S save  Up/Down move  Enter edit field");
     } else {
@@ -1281,8 +1338,8 @@ static int id3v2_set_field(const char *filename, const char *option, const char 
     int ok = run_id3v2_argv(args);
     /* Verify artist write for robustness; if it didn't stick, try a shell fallback. */
     if (ok && strcmp(option, "--artist") == 0) {
-        char ttitle[512] = "", tartist[512] = "", talbum[512] = "", ttrack[64] = "";
-        if (load_id3_into(filename, ttitle, sizeof(ttitle), tartist, sizeof(tartist), talbum, sizeof(talbum), ttrack, sizeof(ttrack)) == 0) {
+        char ttitle[512] = "", tartist[512] = "", talbum[512] = "", ttrack[64] = "", tyear[64] = "", tgenre[128] = "";
+        if (load_id3_into(filename, ttitle, sizeof(ttitle), tartist, sizeof(tartist), talbum, sizeof(talbum), ttrack, sizeof(ttrack), tyear, sizeof(tyear), tgenre, sizeof(tgenre)) == 0) {
             if (!(value && tartist[0] && strcmp(tartist, value) == 0)) {
                 char esc[1024];
                 shell_escape_double_quotes(value ? value : "", esc, sizeof(esc));
@@ -1312,12 +1369,14 @@ static void save_pending_tags(void) {
                 strncpy(track_arg, app.track_buf, sizeof(track_arg)-1);
                 track_arg[sizeof(track_arg)-1] = '\0';
             }
-            char *args[12];
+            char *args[16];
             int ai = 0;
             args[ai++] = "id3v2";
             if (app.title_buf[0]) { args[ai++] = "--song"; args[ai++] = app.title_buf; }
             if (app.artist_buf[0]) { args[ai++] = "--artist"; args[ai++] = app.artist_buf; }
             if (app.album_buf[0]) { args[ai++] = "--album"; args[ai++] = app.album_buf; }
+            if (app.year_buf[0]) { args[ai++] = "--year"; args[ai++] = app.year_buf; }
+            if (app.genre_buf[0]) { args[ai++] = "--genre"; args[ai++] = app.genre_buf; }
             if (track_arg[0]) { args[ai++] = "--track"; args[ai++] = track_arg; }
             args[ai++] = fn;
             args[ai] = NULL;
@@ -1332,12 +1391,14 @@ static void save_pending_tags(void) {
             track_arg[sizeof(track_arg)-1] = '\0';
         }
         {
-            char *args[12];
+            char *args[16];
             int ai = 0;
             args[ai++] = "id3v2";
             if (app.title_buf[0]) { args[ai++] = "--song"; args[ai++] = app.title_buf; }
             if (app.artist_buf[0]) { args[ai++] = "--artist"; args[ai++] = app.artist_buf; }
             if (app.album_buf[0]) { args[ai++] = "--album"; args[ai++] = app.album_buf; }
+            if (app.year_buf[0]) { args[ai++] = "--year"; args[ai++] = app.year_buf; }
+            if (app.genre_buf[0]) { args[ai++] = "--genre"; args[ai++] = app.genre_buf; }
             if (track_arg[0]) { args[ai++] = "--track"; args[ai++] = track_arg; }
             args[ai++] = app.filenameEditing;
             args[ai] = NULL;
@@ -1512,14 +1573,16 @@ void drawEditor(windowData *wd) {
                     cnt++;
                 }
             }
-            if (cnt > 0 && !app.fileDirty) {
+                if (cnt > 0 && !app.fileDirty) {
                 /* only reload common fields when the primary selected file changes */
                 if (last_common_loaded[0] == '\0' || strcmp(last_common_loaded, filenames[0]) != 0) {
-                    load_common_fields(filenames, cnt, app.title_buf, app.artist_buf, app.album_buf, app.track_buf);
+                    load_common_fields(filenames, cnt, app.title_buf, app.artist_buf, app.album_buf, app.track_buf, app.year_buf, app.genre_buf);
                         /* convert common multibyte results into wide for display/edit */
                         mb_to_wc(app.title_buf, app.title_w, sizeof(app.title_w)/sizeof(wchar_t));
                         mb_to_wc(app.artist_buf, app.artist_w, sizeof(app.artist_w)/sizeof(wchar_t));
                         mb_to_wc(app.album_buf, app.album_w, sizeof(app.album_w)/sizeof(wchar_t));
+                        mb_to_wc(app.year_buf, app.year_w, sizeof(app.year_w)/sizeof(wchar_t));
+                        mb_to_wc(app.genre_buf, app.genre_w, sizeof(app.genre_w)/sizeof(wchar_t));
                         mb_to_wc(app.track_buf, app.track_w, sizeof(app.track_w)/sizeof(wchar_t));
                     strncpy(last_common_loaded, filenames[0], MAX_PATH_LEN-1);
                     last_common_loaded[MAX_PATH_LEN-1] = '\0';
@@ -1561,14 +1624,16 @@ void drawEditor(windowData *wd) {
         render_field(w, 3, "Artists: ", app.artist_w, 1);
         render_field(w, 4, "Album : ", app.album_w, 2);
         render_field(w, 5, "Track : ", app.track_w, 3);
+        render_field(w, 6, "Year  : ", app.year_w, 4);
+        render_field(w, 7, "Genre : ", app.genre_w, 5);
 
         /* right column: preview hovered file */
         int sid = windows.directory->sel_id;
-        char ptitle[512] = ""; char partist[512] = ""; char palbum[512] = ""; char ptrack[64] = "";
+        char ptitle[512] = ""; char partist[512] = ""; char palbum[512] = ""; char ptrack[64] = ""; char pyear[64] = ""; char pgenre[128] = "";
         const char *preview_name = NULL;
         if (sid >= 0 && sid < windows.directory->dir_size && isRegularFile(dirlines[sid])) {
             preview_name = dirlines[sid];
-            load_id3_into(preview_name, ptitle, sizeof(ptitle), partist, sizeof(partist), palbum, sizeof(palbum), ptrack, sizeof(ptrack));
+            load_id3_into(preview_name, ptitle, sizeof(ptitle), partist, sizeof(partist), palbum, sizeof(palbum), ptrack, sizeof(ptrack), pyear, sizeof(pyear), pgenre, sizeof(pgenre));
         }
         /* draw vertical separator */
         int r;
@@ -1580,13 +1645,17 @@ void drawEditor(windowData *wd) {
         mvwprintw(w, 4, mid+2, "Artist: %s", partist[0] ? partist : "");
         mvwprintw(w, 5, mid+2, "Album : %s", palbum[0] ? palbum : "");
         mvwprintw(w, 6, mid+2, "Track : %s", ptrack[0] ? ptrack : "");
+        mvwprintw(w, 7, mid+2, "Year  : %s", pyear[0] ? pyear : "");
+        mvwprintw(w, 8, mid+2, "Genre : %s", pgenre[0] ? pgenre : "");
     } else {
         render_field(w, 2, "Title : ", app.title_w, 0);
         render_field(w, 3, "Artists: ", app.artist_w, 1);
         render_field(w, 4, "Album : ", app.album_w, 2);
         render_field(w, 5, "Track : ", app.track_w, 3);
+        render_field(w, 6, "Year  : ", app.year_w, 4);
+        render_field(w, 7, "Genre : ", app.genre_w, 5);
 
-        mvwprintw(w, 7, 1, "Use Up/Down to move, 'e' to edit field (Esc/Tab to cancel), 's' to save changes.");
+        mvwprintw(w, 9, 1, "Use Up/Down to move, 'e' to edit field (Esc/Tab to cancel), 's' to save changes.");
     }
 }
 

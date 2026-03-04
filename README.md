@@ -1,5 +1,19 @@
 # ctag
-An ncurses-based tagger for music files. Inspired by [stag](https://github.com/smabie/stag). Created because easytag sucks, and stag's source code looks to suck with all the goto statements too. It is written in the C programming language.
+An ncurses-based tagger for music files. Inspired by [stag](https://github.com/smabie/stag). Created because I don't like using easytag, and stag's source code is rough to change. It is written in the C programming language.
+
+## Features:
+
+- TUI interface to change metadata tags of music files
+- 2 Panel layout, one for setting metadata, one for browsing directory
+- Uses id3v2 for tagging files
+- Edit individual metadata for a file
+- Selecting files in an order to set their track number
+- Multifile metadata editing. Select multiple files then edit them as if editing a single file. Tags common across all are listed.
+- Recursively setting the Artist name from a Directory name(with an input modal so you can change this if the directory name is incorrect)
+- Recursively setting the Album name from a Directory name(with an input so you can change this if the directory name is incorrect)
+- Recursively setting the Genres and Years of a Directory
+- Fuzzy Finder, Find and navigate to directories by knowing part of the file or directory name
+- Unicode UTF-8 support
 
 ## Contributions
 
@@ -20,15 +34,16 @@ Note: This is a small side project that is also an experiment on my part to see 
 - [X] Marking and editing multiple files
 
 ### Priority 2
-- [ ] Unicode support for input entries
-- [ ] Figure out that damn bug where it will sometimes get Alzheimers and display the wrong metadata information
-- [ ] An option to convert all music to use id3v2 tags
+- [X] Unicode support for input entries
+- [X] Figure out that damn bug where it will sometimes get Alzheimers and display the wrong metadata information
+- [X] PgUp, PgDown, Home and End key support
+- [X] An option to convert all music to use id3v2 tags
 - [ ] An option to make all music drop all id3v1 tags
-- [ ] PgUp, PgDown, Home and End key support
+- [ ] An option to drop all unrelated tags(ogg and other formats have weird tags that can interact strangely in some music players)
 
 ### Priority 3
+- [X] Add a Fuzzy Finder search?
 - [ ] Allow vim style regexes on metadata?
-- [ ] Add a Fuzzy Finder search?
 - [ ] Config file header(inspired by suckless software)
 - [ ] Man pages/keybinds listed
 
